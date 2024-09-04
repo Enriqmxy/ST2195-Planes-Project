@@ -1,0 +1,141 @@
+---
+title: "Coursework"
+author: "Enriq Mah Xing Yao"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+```
+
+Loading in the libraries
+```{r,echo=FALSE}
+#install.packages("tidyverse")
+library(tidyverse)
+#tidyverse is a collection of packages, the main ones we will be using is ggplot2 for part 1 a and b to plot graphs 
+```
+
+## 1a) Metropolis Hastings Model
+```{r}
+# Function for target distribution
+target_function <- function(x) {
+  return(0.5 * exp(-abs(x)))
+}
+```
+
+```{r}
+# Function for proposed distribution(normal distribution)
+proposed_function <- function(x,s) {
+  rnorm(1, mean = x , sd = s)
+}
+```
+
+
+```{r}
+# Random Walk Metropolis algorithm
+metropolis_hastings <- function(N, s, x_zero) {
+  #creates an empty vector to store samples
+  samples_metropolis_hastings <- vector("numeric", length = N)
+  x_current <- x_zero #Start point
+
+  for (i in 1:N) {
+    #generates a sample from a normal distribution 
+    x_star <- proposed_function(x_current,s) 
+    #acceptance ratio 
+    alpha_ratio <- target_function(x_star) / target_function(x_current) 
+    #acceptance criteria if alpha_ratio < 1
+    u <- runif(1)  
+    if (u < alpha_ratio) {
+      x_current <- x_star
+    } else {
+      x_current <- x_current
+    }
+    #adds the new accepted value in the vector which will be used for the next iteration of the for loop 
+    samples_metropolis_hastings[i] <- x_current
+  }
+
+  return(samples_metropolis_hastings)
+}
+```
+
+```{r}
+#implementing the MCMC by inserting starting parameters for the mcmc function 
+# chain 0 
+x_zero <- 0
+N <- 10000
+s <- 1
+
+# Generate samples using metropolis-hastings algorithm
+samples_metropolis_hastings <- metropolis_hastings(N, s, x_zero)
+```
+
+```{r}
+#creating a data frame for plotting
+samples_df <- data.frame(x=samples_metropolis_hastings)
+ggplot(samples_df, aes(x)) +
+  geom_histogram(aes(y = ..density..), bins = 100,color = "black", alpha = 0.8, position = "identity") + 
+  geom_density(aes(colour = "Kernel Density"), linetype = "solid", linewidth = 1) + 
+  geom_function(fun = target_function, aes(colour = "f(x)"), linetype = "dotdash", linewidth = 2) + 
+  labs(title = "Distribution of Metropolis-Hastings Samples", x = "Samples (X)", y = "Density") + 
+  scale_colour_manual(values = c("Kernel Density" = "#F88379", "f(x)" = "#5D3FD3")) + # Specify colors manually
+  theme_minimal()
+#since the 3 graphs have different axis, we are using the y axis for the function and applying to ensure all 3 graphs fit on the same axis
+```
+```{r}
+# Report Monte Carlo estimates of mean and standard deviation
+mean_estimate_MCMC <- mean(samples_metropolis_hastings)
+std_dev_estimate_MCMC <- sd(samples_metropolis_hastings)
+cat("The Monte Carlo Estimates of the mean is", mean_estimate_MCMC, "and the standard deviation is", std_dev_estimate_MCMC)
+```
+
+## 1b) Convergence diagnosis
+
+**Functions**
+```{r}
+mean_function <- function(x){
+  return(mean(x))
+}
+
+variance_function <- function(x){
+  average <- mean_function(x)
+  return(mean((x - average)^2))
+}
+#the built in functions for mean and var can be used instead
+```
+
+**Sequence to obtain r-hat**
+```{r}
+J <- 4
+N <- 2000
+s_values <- seq(0.001, 1, by = 0.001)
+r_hat_vector <- vector("numeric", length = length(s_values))
+#The s-loop iterates through every standard deviation
+for (i in seq_along(s_values)) {
+  s <- s_values[i]
+  sample_list <- vector("list", length = J) #stores the samples from the J loop, since J = 4 it stores 4 vectors of 2000 values 
+  
+  for (j in 1:J) { #runs the mcmc function from part 1a) J times
+    x_zero_j <- rnorm(1)
+    samples_j <- metropolis_hastings(N, s, x_zero_j) # calling the metropolis hastings function 
+    sample_list[[j]] <- samples_j
+  }
+  m_j <- sapply(sample_list, mean_function) 
+  v_j <- sapply(sample_list, variance_function) #applies the mean and variance function to the 4 sets of samples 
+  W <- mean_function(v_j)
+  M <- mean_function(m_j)
+  B <- variance_function(m_j)
+  r_hat <- sqrt((B + W) / W)
+  r_hat_vector[i] <- r_hat
+}
+```
+
+```{r}
+r_hat_df <- data.frame(R_hat = r_hat_vector, S = s_values)
+#plotting a line plot to see how R-hat changes as S becomes larger (checks for convergence)
+ggplot(r_hat_df, aes(x = S, y = R_hat)) +
+  geom_line() +
+  labs(title = "R hat plot", x = "S value (0.001:1)", y = "R hat value")+
+  theme_minimal()
+```
+
+Since the r-hat values asymptotes to 0 as S approaches 1, the metropolis-hastings model shows signs of convergence  

@@ -1,0 +1,673 @@
+---
+title: "Coursework"
+author: "Enriq Mah Xing Yao"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+```
+
+Loading in the libraries  
+```{r,echo=FALSE}
+#install.packages("tidyverse")
+#install.packages("rsample")
+#install.packages("readr")
+#install.packages("MASS")
+#install.packages("corrplot")
+#install.packages("purrr")
+#install.packages("patchwork")
+library(patchwork)
+library(purrr)
+library(corrplot)
+library(tidyverse)
+library(MASS)
+library(readr)
+library(rsample)
+#MASS and rsample are used for logistic regression
+#tidyverse is a collection of packages, the main ones we will be using is ggplot2 and dplyr
+#patchwork is for combining plots into one output 
+#corrplot is for the correlation analysis in question 2b)
+#purr is for readability and efficient coding 
+```
+
+## Question 2  
+
+**Reading the files and establishing data frames**  
+```{r}
+airports_df <- read.csv("airports.csv", header = TRUE) 
+carriers_df <- read.csv("carriers.csv", header = TRUE)
+planes_df <- read.csv("plane-data.csv", header = TRUE)
+
+manifest_df <- data.frame()
+for (year in 1990:1999) {
+  file_name <- paste0(year, ".csv")
+  current_data <- read.csv(file_name)
+  current_data <- distinct(current_data)
+  current_data <- current_data %>% 
+    dplyr :: select(-AirTime,-CancellationCode,-CarrierDelay,-WeatherDelay,-NASDelay,-LateAircraftDelay,-SecurityDelay,-FlightNum,-Origin,-Dest,-TaxiIn,-TaxiOut,-Cancelled) %>%  #Dropping unused columns  
+    filter(ActualElapsedTime >= 0|is.na(ActualElapsedTime), CRSElapsedTime >= 0| is.na(CRSElapsedTime),DepTime <  2400|is.na(DepTime),ArrTime <  2400|is.na(ArrTime)) #filters for times = 0 or na
+  # dplyr :: select is used to specify that the select function is from dplyr and not from MASS
+  manifest_df <- rbind(manifest_df, current_data)
+}
+```
+
+## Overview of the descriptive statistcis  
+Looking at the overall summary of the data, "ActualElapsedTime", "CRSElapsedTime" and "AirTime" should not be able to take negative numbers indicating that there is an error in the data. As such the rows with a negative value for "ActualElapsedTime"and "CRSElapsedTime" will be removed from the main data frame "manifest_df".  
+
+"AirTime", "FlightNum", "Origin", "Dest", "TaxiIn", "TaxiOut" will not be used in the analysis and this it is removed.  
+
+Since the entire analysis is going to be looking solely at delays, where cancelled flights would not be considered delays, "cancelled" is also removed.  
+
+"cancellationcode", "carrierdelay", "Weatherdelay", "SecurityDelay", "NASdelay" and "lateaircraftdelay" are only populated from 2003 to 2006, as such we do not have all 10 years to analyse and thus these rows will also be ommited.  
+
+The data is cleaned at an earlier stage to reduce memory load.  
+
+## Descriptive Statistics
+```{r}
+# Shows the type of data each column
+str(manifest_df)
+```
+
+```{r}
+#Descriptive statistics of manifest_df
+summary(manifest_df)
+
+```
+
+## Classification and creation of new groupings
+
+### What constitutes to a delay?  
+According to the United States Federal Aviation Administration (FAA), an aircraft is considered delayed when it is 15 minutes late than its scheduled time. Cancelled flights would classify as an anomaly and thus the data points with cancelled flights will be omitted in this particular analysis. The scheduled departure time is used as it is what travelers will be looking at when booking flights, thus, if we want to analyse delays and such we analyse form a traveler point of view  
+
+**Degrees of Delay**  
+With the above in consideration, a flight would be considered on time when it is 15 minutes from its scheduled time. A passenger would be entitled for compensations if the flight is delayed by more than 3 hours. The mild classification would be considered if the delay is under 1 hour and the delay would be considered moderate if the delay is under 3 hours. As such the relevant groupings of the degree of delay are as follows (in minutes)  
+* Ontime <= 15  
+* Mild < 60  
+* Moderate < 180  
+* Major > 180  
+
+**Time of Day:**   
+* Midnight(0000-0559)  
+* Morning (0600-1159)  
+* Afternoon(1200-1759)  
+* Evening (1800-2359)  
+
+```{r}
+#Defining a function to group time into time of day 
+group_time <- function(time){
+  hour <- time %/% 100 #only takes in the first 2 digits of the time in HHMM
+  if (hour < 6) {
+    return("Midnight")
+  } else if (hour < 12){
+    return("Morning")
+  } else if (hour < 18){ 
+    return("Afternoon")
+    } else{
+    return("Evening")
+  }
+}
+# Creates a new column called DepTimeOfDay and applying above function
+manifest_df$DepTimeOfDay <- sapply(manifest_df$CRSDepTime,group_time) 
+
+group_delay <- function(time)
+  if (is.na(time)){
+    return(NULL)
+  }  else if (time <= 15){
+    return ("Ontime")  
+  } else if (time < 60){
+    return("Mild")
+  } else if (time < 180){
+    return("Moderate")
+  } else{
+    return("Major")
+  }
+#Creates a new column called Degree_Of_Delay and applying above function
+manifest_df$DegreeofDelay <- sapply(manifest_df$ArrDelay,group_delay)
+
+# Convert Days and Months to strings
+days_order <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+months_order <- c("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December")
+
+manifest_df <- manifest_df %>%
+  mutate(DayOfWeekString = days_order[DayOfWeek],
+         MonthString = months_order[Month])
+
+#Finalised main data frame
+print(head(manifest_df))
+```
+```{r}
+#since the column degreeofdelay is not a string it is converted as such for future data visualization 
+manifest_df <- manifest_df %>%
+  mutate(DegreeofDelay = map_chr(DegreeofDelay, toString))
+str(manifest_df)
+```
+
+```{r}
+#Column names for report
+colnames(manifest_df)
+```
+## Part 2(a.i): When is the best time of day to fly to minimise delay?
+
+For this portion we will consider the overall best time and best time for each year from 1990 to 1999
+
+**Creating Data Frames to answer the question**
+```{r}
+#data frame for overall best time
+time_of_day_df <- manifest_df %>%
+  filter(!is.na(DepTimeOfDay), !is.na(DegreeofDelay) & DegreeofDelay != "") %>% #filters out the empty and 'na' rows
+  count(DepTimeOfDay, DegreeofDelay) %>% #calculating the number of occurrences for each degree of delay
+  group_by(DepTimeOfDay) %>%
+  mutate(WeightedPercentage = round((n / sum(n)) * 100, 2)) #weighted percentage in 2dp
+
+head(time_of_day_df,5)
+```
+
+The average delay is calculated for each year by the time of day and plotted for each year
+
+```{r}
+#data frame for each year
+tod_year_df <- manifest_df %>%
+  group_by(Year, DepTimeOfDay) %>%
+  summarise(AverageArrDelay = mean(ArrDelay, na.rm = TRUE), .groups = "drop") #.groups = "drop" removes the ArrDelay column used to calculate mean 
+
+head(tod_year_df,5)
+```
+
+**Graph for visualization**
+```{r}
+tod_overall_g <- ggplot(time_of_day_df, aes(x = DepTimeOfDay, y = WeightedPercentage)) +
+  geom_col(aes(color = DegreeofDelay, fill = DegreeofDelay), position = position_dodge(0.8), width = 0.7) + #dodge to unstack bar
+  scale_color_manual(values = c("#FF3131", "#CCCCFF","#5D3FD3","#F88379"))+ #maps the colours for each degree of delay
+  scale_fill_manual(values = c("#FF3131", "#CCCCFF","#5D3FD3","#F88379"))+
+  geom_text(aes(label =sprintf("%.2f%%", WeightedPercentage), group = DegreeofDelay), position = position_dodge(0.8),vjust = 0.3, size = 3.5)+ #("%.2f%", weightedpercentage) indicates the text anotations and the format being a string with 2 decimal places and % attached to the string
+  labs(title = "Time of day delays (overall)",
+       x = "Time of Day",
+       y = "Weighted Percentage") +
+  theme_minimal()
+
+tod_overall_g
+```
+
+```{r}
+tod_year_df$Year <- factor(tod_year_df$Year)
+
+tod_year_g <- ggplot(tod_year_df, aes(x = Year, y = AverageArrDelay)) +
+  geom_col(aes(fill = DepTimeOfDay), position = position_dodge(0.8), width = 0.7) +
+  scale_fill_manual(values = c("#FF3131", "#CCCCFF","#5D3FD3","#F88379")) +
+  labs(title = "Average Arrival Delay by Year and Time of Day",
+       x = "Year",
+       y = "Average Arrival Delay") +
+  theme_minimal()
+tod_year_g
+```
+
+**Answer to question: When is the best time of day to fly to minimize delay?**
+```{r}
+highest_ontime_percentage_time_of_day_df <- time_of_day_df %>%
+ filter(DegreeofDelay == "Ontime") %>% arrange(desc(WeightedPercentage))
+
+print(paste("The best time of day to travel to minimise delays is in the", tolower(head(highest_ontime_percentage_time_of_day_df$DepTimeOfDay,1)),"with a weighted percentage delay of", 100 - head(highest_ontime_percentage_time_of_day_df$WeightedPercentage,1),"%"))
+```
+```{r}
+# Creating data frame for minimum average delay per year
+lowest_delay_by_year_df <- tod_year_df %>%
+  group_by(Year) %>%
+  filter(AverageArrDelay == min(AverageArrDelay)) %>%
+  dplyr :: select(Year, DepTimeOfDay, AverageArrDelay)
+
+# for loop to print best time to travel each year
+for (year in unique(lowest_delay_by_year_df$Year)) {
+  year_data <- lowest_delay_by_year_df %>% filter(Year == year)
+  best_time_of_day <- year_data$DepTimeOfDay[which.min(year_data$AverageArrDelay)]
+  cat("For", year, "the best time of day to travel is", best_time_of_day, "\n")
+}
+```
+The worst time to fly is in the evening, as it has the highest weighted percentage for major delays and lowest weighted percentage for flights that are on time. Across the decade, the average delays in the evening is also the highest while mornings and midnights tend to have lower average delays.  
+
+## Part 2(a.ii): When is the best day of the week to fly to minimise delay? 
+
+The definition of delays for this part is the same as the definition for delay in Part 2(a.i), the approach to quantifying the delays for each day of the week for each year will be taking the mean arrival delay, similar to question 2(a.i).  
+
+**Creating Data Frames**
+```{r}
+day_of_week_df <- manifest_df %>%
+  filter(!is.na(DayOfWeekString), !is.na(DegreeofDelay) & DegreeofDelay != "") %>%
+  count(DayOfWeekString, DegreeofDelay) %>%
+  group_by(DayOfWeekString) %>%
+  mutate(WeightedPercentage = round((n / sum(n)) * 100, 2))
+day_order <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+day_of_week_df$DayOfWeek <- factor(day_of_week_df$DayOfWeekString, levels = day_order) #ensures that the graph plots in day order
+
+head(day_of_week_df,5)
+```
+
+```{r}
+#data frame for each year
+dow_year_df <- manifest_df %>%
+  group_by(Year,DayOfWeekString) %>%
+  summarise(AverageArrDelay = mean(ArrDelay, na.rm = TRUE), .groups = "drop")
+dow_year_df$DayOfWeekString <- factor(dow_year_df$DayOfWeekString, levels = day_order) #day_order defined in chunk above
+
+head(dow_year_df,5) 
+```
+
+**Graph for visualization**
+```{r}
+# graph for overall best day 
+# Explanation of arguments are similar to overall plot in 2ai)
+dow_overall_g <- ggplot(day_of_week_df, aes(x = DayOfWeek, y = WeightedPercentage)) +
+  geom_col(aes(color = DegreeofDelay, fill = DegreeofDelay), position = position_dodge(0.8), width = 0.7) +
+  scale_color_manual(values = c("#FF3131", "#CCCCFF","#5D3FD3","#F88379")) +
+  scale_fill_manual(values = c("#FF3131", "#CCCCFF","#5D3FD3","#F88379")) +
+  geom_text(aes(label =sprintf("%.2f%%", WeightedPercentage), group = DegreeofDelay), 
+            position = position_dodge(0.8), vjust = -0.3, size = 3.5) +
+  labs(title = "Weighted Percentage for Each Day Of Week(Overall)",
+       x = "Day of Week",
+       y = "Weighted Percentage") +
+  theme_minimal()
+dow_overall_g
+```
+
+
+```{r}
+#graph for yearly best day 
+dow_year_g <- ggplot(dow_year_df, aes(x = DayOfWeekString, y = AverageArrDelay)) +
+   geom_bar(stat = "identity", position = "dodge", aes(fill = DayOfWeekString)) + #since the mean is calculated when creating the data frame, stat= "identity" is used to plot directly from the data frame
+   facet_wrap(~ Year, nrow = 2) + #facet wrap allows all the graphs to be clumped together in 1 output sharing the same legend this gives a 2x5 grid to plot 10 graphs
+   labs(title = "Average Arrival Delay of each Day by Year",
+       x = "Day of the Week", y = "Average Arrival Delay") +
+   theme_minimal() +
+   theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #label angled at 90 degrees to ensure graph redabilit
+   scale_fill_manual(values = c("#5D3FD3", "#6E48E1", "#7F56EE", "#9164FB", "#A372FF", "#B580FF", "#C78EFF"))
+
+dow_year_g
+```
+
+**Answer to question: When is the best day of the week to fly to minimize delay?**
+```{r}
+highest_ontime_percentage_day_of_week_df <- day_of_week_df %>%
+ filter(DegreeofDelay == "Ontime") %>% arrange(desc(WeightedPercentage))
+
+print(paste("The best day of the week to travel to minimise delays is on", tolower(head(highest_ontime_percentage_day_of_week_df$DayOfWeekString,1)),"with a weighted percentage delay of", 100 - head(highest_ontime_percentage_day_of_week_df$WeightedPercentage,1),"%"))
+```
+
+```{r}
+#Creating data frame for minimum average delay per year
+lowest_delay_dow_year_df <- dow_year_df %>%
+  group_by(Year) %>%
+  filter(AverageArrDelay == min(AverageArrDelay)) %>%
+  dplyr :: select(Year, DayOfWeekString, AverageArrDelay)
+lowest_delay_dow_year_df$DayOfWeekString <-  as.character(lowest_delay_dow_year_df$DayOfWeekString) #need to change back to chr so that the output is day instead of the number associated to the day 
+
+#for loop to print best time to travel each year
+for (year in unique(lowest_delay_dow_year_df$Year)) {
+  year_df <- lowest_delay_dow_year_df %>% filter(Year == year)
+  cat("For", year, "the best day to travel is", year_df$DayOfWeekString, "\n")
+}
+```
+The worst time to fly is on Thursdays and Fridays, as it has the two days have the highest weighted percentage for major delays and lowest weighted percentage for flights that are on time. Across the decade, the average delays on the 2 days are also the highest while saturdays tend to have lower average delays.  
+
+## Part 2 (b). Evaluate whether older planes suffer more delays on a year-to-year basis   
+In this analysis, the delay is not specified, thus both arrival and departure delays are analysed. To make the analysis simple, we will look at the average delays. A plane would be considered old when it is more than 20 years old. We will be performing a correlation analysis on age of plane and delays.  
+
+It is important to note that tail number for years 1990 to 1994 is not available and thus cannot be used for this analysis as there is no other way to merge and identify the plane.  
+  
+Classification of correlations, in absolute values:  
+Perfect Correlation (1)  
+Strong Correlation (0.7 to 0.99)  
+Moderate Correlation (0.5 to 0.69)  
+Weak Correlation (0.3 to 0.49)  
+No Correlation (0 to 0.29)  
+  
+This analysis will look at the overall delays and also on a year to year basis.  
+
+**Creating the data frame for delays**  
+```{r}
+#Cleaning Planes data 
+planes_df$year <- as.integer(planes_df$year) #ensures that all the different forms of null is converted into "null"
+str(planes_df)
+```
+
+```{r}
+# Data frame for age of planes and delays for every year 
+# Joins both data frames by the tailnumber and finds average delay grouped by age
+delay_planes_df <- manifest_df %>%
+  rename_all(tolower) %>%
+  inner_join(planes_df, by = "tailnum", suffix = c(".manifest_df", ".planes_df")) %>% # this is where 1990 - 1994 data is left out as tailnum is all NA 
+  filter(year.planes_df != 0) %>% #since some null years data = 0 this takes care of those rows
+  rename(YearOfFlight = year.manifest_df, YearOfManufacture = year.planes_df) %>%
+  mutate(AgeOfPlane =YearOfFlight - YearOfManufacture) %>% 
+  group_by(YearOfFlight,AgeOfPlane) %>%
+  filter(!is.na(AgeOfPlane), AgeOfPlane >= 0) %>% 
+  summarise(AverageArrDelay = mean(arrdelay, na.rm = TRUE),
+            CountArrDelay = sum(!is.na(arrdelay)),
+            AverageDepDelay = mean(depdelay, na.rm = TRUE),
+            CountDepDelay = sum(!is.na(depdelay)), .groups = "drop")
+
+head(delay_planes_df,5)
+```
+
+```{r}
+#Data frame for each year split into a list of 5 data frames
+delay_planes_yearly_df <- split(delay_planes_df,delay_planes_df$YearOfFlight)
+
+head(delay_planes_yearly_df, 5)
+```
+
+**Answer to the question: Do older planes suffer more delays?**  
+
+**Overall correlation**   
+We want to first have an initial visual representation of the relationship between the age of planes, average departure delay and average arrival delay 
+```{r}
+# Graph for visualization
+ ggplot() + # Overlay both departure and arrival delays for comparison 
+  geom_point(data = delay_planes_df, aes(x = AgeOfPlane, y = AverageArrDelay, color = "Average Arrival Delay")) +
+  geom_point(data = delay_planes_df, aes(x = AgeOfPlane, y = AverageDepDelay, color = "Average Departure Delay")) +
+  labs(title = "Age of Plane and Arrival/Departure Relationship", x = "Age of Plane", y = "Average delay (minutes)") +
+  scale_color_manual(name = "Delay Type", values = c("Average Arrival Delay" = "#F88379", "Average Departure Delay" = "#5D3FD3")) + #creating the legend
+  theme_minimal()
+
+ggplot(delay_planes_df, aes(x = AverageArrDelay , y = AverageDepDelay)) +
+  geom_point() +
+  labs(title = "Arrival and Departure Relationship", x = "Average Arrival delay (minutes)", y = "Average Departure delay (minutes)") +
+  theme_minimal()
+```
+
+It can be implied from the 2 plots that the age of plane seems to have a weak negative linear correlation on average arrival and delay (in minutes). While the average arrival and delay has a strong positive linear correlation. We now want to test the pearson correlation to have statistical values and create a correlation plot between the 3 variables.  
+
+```{r}
+#correlation test between age of plane and arrival delay/departure delay (overall)
+cor.test(delay_planes_df$AgeOfPlane,delay_planes_df$AverageArrDelay)
+cor.test(delay_planes_df$AgeOfPlane,delay_planes_df$AverageDepDelay)
+cor.test(delay_planes_df$AverageArrDelay,delay_planes_df$AverageDepDelay)
+```
+
+**Correlation plot**
+```{r}
+#Setting up the correlation matrix
+delay_planes_corr_df <- delay_planes_df %>% 
+  dplyr :: select(AgeOfPlane,AverageDepDelay,AverageArrDelay)
+correlation_matrix <- cor(delay_planes_corr_df)
+
+#Plotting the correlation plot 
+corrplot::corrplot(correlation_matrix, order = 'AOE', addCoef.col = 'black', tl.pos = 'd', cl.pos = 'n', col = COL2('RdBu'),tl.cex = 0.7, cl.cex = 0.7,mar = c(5, 5, 3, 5), main = "Overall Correlation") # 'AOE' gives the circles its different sizes and addcoeff.col gives each correlation coefficient the rest is aesthetic and scaling the graph to fit the output size
+```
+
+As per our visual inspection, the overall correlation of age of plane with average departure delay and average arrival delay are both weak negative linear correlations. The average arrival delays do have a slightly higher correlation with the age of a plane compared to the average departure delays.  
+
+**Individual year correlations**    
+For the individual years, only the correlation plot will be plotted as it is the most effective and compact way to visualise all the correlation coefficients across every year. 
+```{r}
+# for loop to plot each year's data frame
+for (i in seq_along(delay_planes_yearly_df)) {
+    current_yearly_delay_df <- delay_planes_yearly_df[[i]]
+    
+    #selecting the correlation variables 
+    corr_var <- current_yearly_delay_df[, c("AgeOfPlane", "AverageDepDelay", "AverageArrDelay")]
+    correlation_matrix <- cor(corr_var)
+    
+    # Plotting the correlation matrix
+    corrplot(correlation_matrix, order = 'AOE', addCoef.col = 'black', tl.pos = 'd',cl.pos = 'n', col = COL2('RdBu'), tl.cex = 0.7, cl.cex = 0.7,mar = c(5, 5, 3, 5),main = paste("Correlation Plot for Year", unique(current_yearly_delay_df$YearOfFlight)))
+}
+```
+
+Across the 5 years, we see that there is a negative correlation between the age of planes and the average delays for both departure and arrivals. For years 1995 and 1996, there is a  moderate negative linear correlation with age of plane and average departure delay while there is a  weak negative linear correlation with age of plane and average arrival delay. For years 1997 and 1998, there is a  moderate negative linear correlation with age of plane and average arrival delay. For 1997 there is a  weak negative linear correlation with age of plane and average departure delay while 1998 has no correlation between age of plane and average departure delay. In 1999, there is no correlation between age of planes and average delays for both departure and arrivals. 
+
+In general, the age of a plane has weak negative linear correlation with delays. However, it seems that older planes suffer from less delays than newer planes. However, older planes seem to be more inconsistent than younger planes. This may be due to the reliability of older planes using tired and tested parts while some new planes be using experimental parts, while this cannot be confirmed statistically it may be a factor as to why older planes have less delays than newer planes.  
+
+## Part 2 (c) Logistic regression
+In this part, the visualisation of the probabilities will be plotted with a dot plot where the fitted values(predicted probabilities of each flight) will be plotted against each independent variable. The mean fitted values for each year will then be plotted across the years to see how the probability of diverted flights change across the years. Finally, a logistic regression will be done for each year to get the yearly coefficients for each independent variable while will be plotted in a line plot to visualize how the coefficients change across the years. 
+
+Since the glm function requires alot of memory to execute, a smaller sample 20% of the manifest dataframe will be drawn using a stratified split method to ensure there is representation for diverted flights. This sample manifest data frame will be used to test some assumptions and build our regression model and where its accuracy will be tested. The generated model from this sample data set will then be used for the 10 years of data to draw the relevant insights. PS. There is no need to perform this step if the system has sufficient memory. 
+
+The main assumption that will be tested is for perfect multicollinearity as long as the correlation is not equal to 1, the assumption is satisfied.
+
+```{r}
+#clearing the environment for maximum available memory 
+#Maximising avaiable memory
+items_to_keep <- c("manifest_df","airports_df", "carriers_df", "planes_df")
+all_objects <- ls()
+objects_to_remove <- setdiff(all_objects, items_to_keep)
+rm(list = objects_to_remove)
+```
+
+Looking at the data set again, since a logistic regression can only take on numerical variables, to include carriers the variables will need to be converted into dummy variables or ordinal variables. While coding a dummy variable is ideal, there are way to many carriers to consider this approach, as such we will treat it as an ordinal variable. Month and day will also be treated as an ordinal variable as dummy variables for these 2 variables will result in memory errors or a very long run time often resulting in a crash.  
+
+```{r}
+#Setting up the data frame for regression
+manifest_df$Diverted <- factor(manifest_df$Diverted) #changing diverted to a factor (binary dependent variable)
+
+#Creating numerical index for and carriers 
+carriers_df$code_n <- row.names(carriers_df) #index
+carriers_df$code_n <- as.integer(as.character(carriers_df$code_n)) #ensuring its a integer for logistic regresison 
+
+# Merging the dataframes and retreiving the code_n
+regression_manifest_df <- manifest_df %>%
+  inner_join(carriers_df, by =c("UniqueCarrier"= "Code"), suffix = c(".manifest_df", ".carriers_df")) %>% 
+  dplyr :: select(Year,Month,DayOfWeek,DepTime,CRSDepTime,CRSArrTime,Distance,CRSElapsedTime,code_n,Diverted)
+regression_manifest_df<- na.omit(regression_manifest_df)
+
+head(regression_manifest_df,5)
+```
+
+```{r}
+#Checking for diverted in whole data frame 
+diverted_count <- sum(regression_manifest_df$Diverted == 1) 
+total_rows <- nrow(regression_manifest_df)
+percentage_diverted <- (diverted_count/total_rows)*100
+percentage_diverted
+```
+Since a 0.23% of the data contains diverted flights it is important that our sample data frame contains the same percentage of diverted flights as the full data frame. This is why we use a stratified split to create a sample. This approach will affect the accuracy, however given the limited memory, it is 
+the best way to include as many features as possible and get a final model in a timely manner.  
+
+### Assumption test (No perfect multicollinearity)
+```{r}
+selected_variables <- c("Month", "DayOfWeek", "DepTime", "CRSDepTime", "CRSArrTime", "Distance", "CRSElapsedTime","code_n")
+#correlation matrix
+correlation_matrix <- cor(regression_manifest_df[, selected_variables])
+    
+# Plotting the correlation matrix
+corrplot(correlation_matrix, addCoef.col = 'black', tl.pos = 'd', cl.pos = 'n', col = COL2('RdBu'), main = "Correlation plot")
+```
+
+It can be seen that there are some variables with high pairwise correlations, mainly distance and CRSElapsedTime which have a correlation score of 0.99, thus distance is removed from the model as it is less significant compared to CRSElapsedTime in previous iterations of running the model. Since none of the other pairwise correlation = 1, the assumption of no perfect multicollinerity is satisfied. It is also noted that the pairs with high correlation is expected where a larger flight distance would result in more scheduled time, and the arrival and departure times being highly correlated is expected as well.  
+
+### Sampling
+Since the number of diverted flights is very low we want to ensure representation for the diverted flights thus we will use a stratified split method to extract a sample for our logistic regression model.  
+```{r}
+# Seed set for reproducability 
+set.seed(123)
+# Generate random indices for the sample data frame
+sample_ratio <- 0.2
+
+# Creating stratified split rule 
+strat_split <- initial_split(regression_manifest_df, prop = sample_ratio, strata = "Diverted") #stratification split with diverted as the target variable
+
+# extracting the 20% sample
+sample_manifest_df <- training(strat_split)
+
+# checking for diverted in sample_manifest_df
+table(sample_manifest_df$Diverted)
+```
+
+```{r}
+#Maximising available memory
+items_to_keep <- c("regression_manifest_df", "sample_manifest_df")
+all_objects <- ls()
+objects_to_remove <- setdiff(all_objects, items_to_keep)
+rm(list = objects_to_remove)
+```
+
+### Building the Logistic regression model and training
+```{r}
+# Initial model built with every feature shortlisted in "regression_manifest_df"
+logit_diverted_initial <- glm(Diverted ~ Month + DayOfWeek +DepTime + CRSDepTime + CRSArrTime + CRSElapsedTime + code_n, data = sample_manifest_df, family = "binomial")
+summary(logit_diverted_initial)
+```
+The output shows DayOfWeek and Code_n (Unique carrier) are not significant with p values larger than 0.05. Therefore we use stepAIC from the "MASS" package to improve the model by automating the stepwise regression. The function runs the logistic regression each time removing the least significant variable to come up with the most accurate model possible.  
+
+### Improving the model  
+**Overall model**  
+```{r}
+logit_diverted_model <- stepAIC(logit_diverted_initial) #stepwise regression function
+summary(logit_diverted_model)
+#The final improved model formula = Diverted ~ Month + DepTime + CRSDepTime + CRSArrTime + CRSElapsedTime, family = "binomial"
+```
+
+After the stepwise regression model process is done, we see that DayOfWeek and Code_n (Unique carrier) are removed and all features are now highly significant.  
+
+**Ranking regressor/ features based on coefficient significance.**  
+Looking at the output of “logit_diverted_model”, a larger absolute Z value implies a more significant regressor/ feature. From the most significant feature to the least, we have: CRSElapsedTime (61.594), Month (-15.730), DepTime (12.710), CRSDepTime (-10.747), CRSArrTime(9.019). From this it can be implied that a smaller scheduled elapsed time would result in a lower probability of diversions, which could also imply that shorter flights tend to divert less.  
+
+```{r}
+#Maximising available memory
+items_to_keep <- c("regression_manifest_df", "sample_manifest_df","logit_diverted_model")
+all_objects <- ls()
+objects_to_remove <- setdiff(all_objects, items_to_keep)
+rm(list = objects_to_remove)
+```
+
+### Implementing the model on the full dataset  
+**Predicting Diverted flights using model**
+```{r}
+# Gives the predicted probabilities/ fitted values of the logistic regression for each flight
+logit_diverted_predict <- predict(logit_diverted_model,regression_manifest_df,type = "response")
+```
+
+### Misclassification Error & Accuracy- Testing Data
+```{r}
+# Includes the fitted values into "regression_manifest_df" so that we can test accuracy and plot graphs
+regression_manifest_df$Probability <- logit_diverted_predict
+# Decides if the prediction is diverted or not
+regression_manifest_df$Predict.diverted <- ifelse(logit_diverted_predict >= 0.5,1,0)
+# Confusion matrix and accuracy to validate model
+confusion_matrix <- table(Predicted = regression_manifest_df$Predict.diverted, Actual = regression_manifest_df$Diverted)
+accuracy <- mean(regression_manifest_df$Predict.diverted == regression_manifest_df$Diverted)
+print(paste("Model Accuracy:", accuracy))
+print(confusion_matrix)
+```
+
+The model accuracy of 99.7% is considered very good but there is the worry of over fitting the model. It can be seen that the model is able to predict true non-diverted flights well but not very well for true diverted flights.
+
+### Plotting for Overall probability against all 5 retained regressors in logit_diverted_model
+```{r}
+independent_variables <- c("Month", "DepTime", "CRSDepTime", "CRSArrTime", "CRSElapsedTime") #manually defining the variables for plotting
+
+# Create scatter plots for each independent variable
+plots <- map(independent_variables, ~ { #iterates through every independent variable 
+  variable <- .x #in each iteration, .x carries the given variable 
+  ggplot(regression_manifest_df, aes(x = !!rlang::sym(variable), y = Probability)) + #using the data frame, x = !!rlang::sym(variable) allows the x axis to be dynamically assigned based on the iteration of .x, the independent variable
+    geom_point(color = "blue") +
+    labs(title = paste0("Predicted Probability of Diversion vs. ", variable),
+         x = variable, y = "Predicted Probability of Diversion")
+})
+
+print(plots)
+```
+
+**Month**  
+The probability of diversions and the month seem to be quite evenly distributed where an equal amount of predicted diverted flights(>0.5) are observed throughout the months. 
+
+**Departure Time**  
+As the departure times increase, the predicted probability of diversion also increases. This means that the model predicts that diverted flights tend to happen for frequently later into the day.  
+
+**Scheduled Departure Time**  
+As the scheduled departure times increase, the predicted probability of diversion also increases. This means that the model predicts that diverted flights tend to happen for frequently when the flight is scheduled to fly later into the day. The model predicts that most diverted flights are scheduled to fly from 0700 to 2100. It is noted that there is one outlier where the flight is predicted to be diverted and it is scheduled to fly around midnight.   
+
+**Scheduled Arrival Time**  
+As the scheduled arrival times increase, the predicted probability of diversion also increases. This means that the model predicts that diverted flights tend to happen for frequently when the flight is scheduled to land later into the day. The model predicts that most diverted flights are scheduled to land from 0700 to 2100. It is noted that there is one outlier where the flight is predicted to be diverted and it is scheduled to land around midnight.  
+The scheduled arrival and departure predictions seem to have a very similar prediction, indicating that scheduled arrival times and departeure times are highly correlated.  
+
+**Scheduled Elapsed Time**   
+The scheduled elapsed time shows an upward trend in diversion probabilty, where the longer the scheduled flight, the higher the probabilty of diversion. With all the predicted diverted flights having a scheduled elapsed time of 1400 minutes and above. This implies that the model is likely to predict that a flight is diverted if the longer the scheduled elapsed time.  
+
+### Plotting the monthly mean probabilities for every year
+```{r}
+# Setting up the data frame to plot 
+yearly_mean_probabilities <- regression_manifest_df %>% 
+  group_by(Year) %>% summarise(Mean_Probability = mean(Probability, na.rm = TRUE), .groups = "drop")
+
+head(yearly_mean_probabilities,5)
+```
+
+```{r}
+mean_probabilities_g <- ggplot(yearly_mean_probabilities, aes(x = Year , y = Mean_Probability)) +
+  geom_line() + 
+  geom_point() +  
+  labs(title = "Mean Probabilities by Year", x = "Year", y = "Mean Probability") +
+  geom_text(aes(label = sprintf("%.6f", Mean_Probability)), vjust = -0.5, hjust = 0.5) +
+  theme_minimal()
+
+mean_probabilities_g
+```
+
+We can imply that there is a steady increase in the mean probability of diversions with a small dip from 1993 to 1994, the mean probability then spikes in the second half of the decade reaching a 0.24% diversion rate in 1999. While a 0.2% diversion rate is good, it may be good to investigate why the mean probability of diversion is on the rise.  
+
+### Running the logit model for every year and storing the coefficents of regressors
+```{r}
+#splitting the data frame by year
+yearly_manifest_df <- regression_manifest_df %>%
+  group_split(Year)
+```
+
+```{r}
+# Create empty data frame to store coefficients for logistic regression done for each year (10 sets total to be obtained)
+coefficients_df <- data.frame(Year = integer(),
+                              Month = numeric(),
+                              DepTime = numeric(), 
+                              CRSDepTime= numeric(), 
+                              CRSArrTime = numeric(), 
+                              CRSElapsedTime = numeric())
+
+# Loop through each yearly data frame
+for (yearly_df in yearly_manifest_df) {
+  # using the model from stepAIC
+  model <- glm(Diverted ~ Month +DepTime + CRSDepTime + CRSArrTime + CRSElapsedTime, data = yearly_df, family = "binomial")
+  
+  # Extract coefficients
+  coefficients <- coef(summary(model))[, "Estimate"]
+  coefficients["Year"] <- unique(yearly_df$Year)
+  coefficients_df <- rbind(coefficients_df, coefficients)
+}
+
+# intercept included as the model's output contains intercepts, but will not  be plotted
+colnames(coefficients_df) <- c("Intercept","Month", "DepTime", "CRSDepTime", "CRSArrTime", "CRSElapsedTime","Year")
+
+print(coefficients_df)
+```
+
+#Plotting the regressor coefficient across the 10 years 
+```{r}
+# Function for plotting coefficients by the independent variable for a given iteration
+plot_coefficients <- function(data, independent_variable) {
+  ggplot(data, aes(x = Year, y = !!sym(independent_variable))) + # similar to the 5 plots above (diversion probability) except the iteration of the independent variable is now on the y axis
+    geom_point() +
+    geom_line() +
+    labs(title = independent_variable, x = "Year", y = "Coefficient Estimate") +
+    theme_minimal()
+}
+
+independent_variables <- c("Month", "DepTime", "CRSDepTime", "CRSArrTime", "CRSElapsedTime") #same as above plot 
+
+#plotting the graphs
+plots_coef <- map(independent_variables, ~ plot_coefficients(coefficients_df, .x))
+plots_coef <- reduce(plots_coef, `+`) #combines the plots into one output
+
+plots_coef
+```
+
+**Month (ordinal)**  
+Since the overall coefficients are negative, this means deeper into the year, the probability of diversion reduces. It is also noted that years 1993, 1994 and 1999, saw the coefficient estimate fall the lowest at to a value of -0.05 to -0.06. This implies that for these years the month has a larger influence on diversion probability.  
+
+**Departure & Scheduled Departure Time (continuous)**  
+The coefficients for departure times are mostly positive, implying that departure times are positively related to the probability of diversion. Coefficients for scheduled departure times are mostly negative unlike departure time, implying that scheduled departure times are negatively related to the diversion probability. Comparing the two coefficient estimate graphs, we see an almost mirror-image where there is a sharp rise for departure times from 1994 to 1995 and a sharp fall for scheduled departure times. However, both graphs approach 0 towards the 2nd half of the decade implying that both features lose influence over diversion probability in the 2nd half of the decade.  
+
+**Scheduled Arrival Time (continuous)**  
+Mostly positive coefficients estimates imply a positive relationship between scheduled arrival times and diversion probability. Seeing that the coefficient estimates grow larger over the years, this means that this feature gains influence over diversion probability throughout the decade.  
+
+**Scheduled Elapsed Time (continuous)**   
+All positive coefficients estimates imply a positive relationship between scheduled elapsed times and diversion probability. 1998 had the largest coefficient estimate value implying that CRSElapsedTime had more influence over diversion probability compared to the other years with 1990 and 1999 showing the smallest amount of influence.   
+
+**Overall thoughts on the model**  
+While the model is not very good in predicting diverted flights, it is good at predicting non diverted flights. The model may be improved by including dummy variables for unique carriers, origin airport and destination airport. However this approach would require a lot of memory from a computer as the unique variables would be up to almost 8000 as there are more than 3000 unique airports and more than 1000 unique carriers. Another way to improve the accuracy of the model is to have more diverted flights to train the model as a diversion rate of 0.23% might be too low to train the model adequately.  
